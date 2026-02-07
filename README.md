@@ -113,7 +113,7 @@ Constraints:
 - pagination uses opaque keyset cursor returned by `next_cursor`
 
 ## 7. App Integration Steps (Android + iOS)
-1. Replace mock auth usage with real Supabase auth session handling.
+1. Use Supabase auth session handling in the mobile app.
 2. Pass current access token with every protected request.
 3. Add new backend config in shared code (e.g. `BackendConfig(baseUrl)`), separate from old Supabase REST feed config.
 4. On create-post screen:
