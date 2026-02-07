@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { MAX_VIDEO_DURATION_SECONDS } from "../config.js";
 import { attachAuthUser, requireAuth } from "../lib/auth.js";
-import { buildPublicPlaybackHlsUrl, buildPublicThumbnailUrl, getCloudflareVideo } from "../lib/cloudflare.js";
-import { countWords, toApiPost } from "../lib/posts.js";
+import { buildSignedPlaybackToken, getCloudflareVideo, resolvePlaybackUrls } from "../lib/cloudflare.js";
+import { countWords, toApiPost, toApiPostWithVideoPlayback } from "../lib/posts.js";
 import { ensureProfile } from "../lib/profiles.js";
-import { supabaseAdmin, unwrapData } from "../lib/supabase.js";
+import { supabaseAdmin, unwrapData, unwrapOptionalData } from "../lib/supabase.js";
 const createPostSchema = z
     .object({
     title: z.string().trim().min(1).max(120),
@@ -114,6 +114,19 @@ function applyKeysetPagination(query, cursor) {
         return query;
     return query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`);
 }
+async function buildVideoPlaybackMap(rows) {
+    const entries = rows.filter((row) => row.media_type === "video" && row.cloudflare_uid);
+    const playbackEntries = await Promise.all(entries.map(async (row) => {
+        const uid = row.cloudflare_uid;
+        const signedToken = await buildSignedPlaybackToken(uid);
+        const playback = resolvePlaybackUrls({
+            uid,
+            signedToken
+        });
+        return [uid, { ...playback, signedToken }];
+    }));
+    return new Map(playbackEntries);
+}
 async function fetchPostPage(params) {
     let query = supabaseAdmin
         .from("posts")
@@ -132,6 +145,7 @@ async function fetchPostPage(params) {
     const rows = unwrapData(result, "Failed to load posts");
     const hasNext = rows.length > params.limit;
     const pageRows = hasNext ? rows.slice(0, params.limit) : rows;
+    const videoPlaybackByUid = await buildVideoPlaybackMap(pageRows);
     const nextCursor = hasNext
         ? encodeCursor({
             createdAt: normalizeTimestamp(pageRows[pageRows.length - 1]?.created_at ?? ""),
@@ -142,7 +156,8 @@ async function fetchPostPage(params) {
         .map((row) => {
         if (!row.author)
             return null;
-        return toApiPost(row, row.author);
+        const videoPlayback = row.cloudflare_uid ? videoPlaybackByUid.get(row.cloudflare_uid) : undefined;
+        return toApiPostWithVideoPlayback(row, row.author, videoPlayback);
     })
         .filter((item) => item != null);
     return {
@@ -212,13 +227,30 @@ export async function registerPostRoutes(fastify) {
             if (parsed.data.media.type === "video") {
                 mediaType = "video";
                 cloudflareUid = parsed.data.media.cloudflareUid;
+                const ownershipResult = await supabaseAdmin
+                    .from("video_uploads")
+                    .select("uid,user_id,status,duration_seconds")
+                    .eq("uid", cloudflareUid)
+                    .maybeSingle();
+                const ownedUpload = unwrapOptionalData(ownershipResult);
+                if (!ownedUpload || ownedUpload.user_id !== author.id) {
+                    return reply.forbidden("Video upload does not belong to current user");
+                }
                 const video = await getCloudflareVideo(cloudflareUid);
+                if (!video.readyToStream) {
+                    return reply.conflict("Video is still processing");
+                }
                 const durationSeconds = Math.round(video.duration ?? 0);
                 if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
                     return reply.unprocessableEntity("Video exceeds 3-minute limit");
                 }
-                mediaUrl = buildPublicPlaybackHlsUrl(cloudflareUid);
-                thumbnailUrl = buildPublicThumbnailUrl(cloudflareUid);
+                const playback = resolvePlaybackUrls({
+                    uid: cloudflareUid,
+                    playback: video.playback,
+                    thumbnail: video.thumbnail
+                });
+                mediaUrl = playback.hls;
+                thumbnailUrl = playback.thumbnail;
             }
             else {
                 mediaType = "image";
@@ -241,8 +273,18 @@ export async function registerPostRoutes(fastify) {
                 .select("id,author_id,title,description,topic,location,hashtags,media_type,media_url,thumbnail_url,cloudflare_uid,like_count,bookmark_count,view_count,comment_count,share_count,created_at,updated_at")
                 .single();
             const createdPost = unwrapData(insertResult, "Failed to create post");
+            const videoPlayback = createdPost.media_type === "video" && createdPost.cloudflare_uid
+                ? await (async () => {
+                    const uid = createdPost.cloudflare_uid;
+                    const signedToken = await buildSignedPlaybackToken(uid);
+                    const playback = resolvePlaybackUrls({ uid, signedToken });
+                    return { ...playback, signedToken };
+                })()
+                : undefined;
             return {
-                post: toApiPost(createdPost, author)
+                post: createdPost.media_type === "video"
+                    ? toApiPostWithVideoPlayback(createdPost, author, videoPlayback)
+                    : toApiPost(createdPost, author)
             };
         });
         app.post("/posts/:postId/likes", { preHandler: requireAuth }, async (request, reply) => {

@@ -1,4 +1,5 @@
 import type { ProfileRow } from "./profiles.js";
+import type { StreamPlaybackUrls } from "./cloudflare.js";
 
 export type PostRow = {
   id: string;
@@ -27,8 +28,10 @@ type ApiBlock = {
   text?: string;
   items?: string[];
   url?: string;
+  dash_url?: string;
   caption?: string;
   thumbnail_url?: string;
+  signed_token?: string;
 };
 
 export type ApiPost = {
@@ -70,15 +73,17 @@ function toAuthor(profile: ProfileRow) {
   };
 }
 
-function toBlocks(post: PostRow): ApiBlock[] {
+function toBlocks(post: PostRow, videoPlayback?: StreamPlaybackUrls & { signedToken?: string | null }): ApiBlock[] {
   const blocks: ApiBlock[] = [];
   if (post.media_type === "video") {
     blocks.push({
       id: `video-${post.id}`,
       type: "video",
-      url: post.media_url,
-      thumbnail_url: post.thumbnail_url ?? undefined,
-      caption: post.description
+      url: videoPlayback?.hls ?? post.media_url,
+      dash_url: videoPlayback?.dash,
+      thumbnail_url: videoPlayback?.thumbnail ?? post.thumbnail_url ?? undefined,
+      caption: post.description,
+      signed_token: videoPlayback?.signedToken ?? undefined
     });
   } else {
     blocks.push({
@@ -125,6 +130,29 @@ export function toApiPost(post: PostRow, profile: ProfileRow): ApiPost {
     author: toAuthor(profile),
     title: post.title,
     blocks: toBlocks(post),
+    topics: [post.topic, ...(post.hashtags ?? [])],
+    created_at: post.created_at,
+    updated_at: post.updated_at,
+    stats: {
+      like_count: post.like_count,
+      bookmark_count: post.bookmark_count,
+      view_count: post.view_count,
+      comment_count: post.comment_count,
+      share_count: post.share_count
+    }
+  };
+}
+
+export function toApiPostWithVideoPlayback(
+  post: PostRow,
+  profile: ProfileRow,
+  videoPlayback?: StreamPlaybackUrls & { signedToken?: string | null }
+): ApiPost {
+  return {
+    id: post.id,
+    author: toAuthor(profile),
+    title: post.title,
+    blocks: toBlocks(post, videoPlayback),
     topics: [post.topic, ...(post.hashtags ?? [])],
     created_at: post.created_at,
     updated_at: post.updated_at,

@@ -28,6 +28,12 @@ type StreamVideoResult = {
   };
 };
 
+export type StreamPlaybackUrls = {
+  hls: string;
+  dash: string;
+  thumbnail: string;
+};
+
 async function cloudflareRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${config.cloudflareAccountId}${path}`,
@@ -41,7 +47,13 @@ async function cloudflareRequest<T>(path: string, init?: RequestInit): Promise<T
     }
   );
 
-  const payload = (await response.json()) as CloudflareApiResult<T>;
+  const rawPayload = await response.text();
+  let payload: CloudflareApiResult<T>;
+  try {
+    payload = (rawPayload ? JSON.parse(rawPayload) : { success: response.ok, result: null }) as CloudflareApiResult<T>;
+  } catch {
+    throw new Error(`Unexpected Cloudflare API response (${response.status})`);
+  }
   if (!response.ok || !payload.success) {
     const errorText = payload.errors?.map((entry) => entry.message).join("; ") || "Cloudflare API error";
     throw new Error(errorText);
@@ -85,6 +97,62 @@ export function buildPublicPlaybackDashUrl(uid: string) {
 
 export function buildPublicThumbnailUrl(uid: string) {
   return `${config.cloudflareDeliveryBaseUrl}/${uid}/thumbnails/thumbnail.jpg`;
+}
+
+function toAbsoluteDeliveryUrl(url: string) {
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+
+  if (url.startsWith("/")) {
+    return `${config.cloudflareDeliveryBaseUrl}${url}`;
+  }
+
+  return `${config.cloudflareDeliveryBaseUrl}/${url.replace(/^\/+/, "")}`;
+}
+
+function appendSignedToken(url: string, signedToken: string | null) {
+  if (!signedToken) return url;
+
+  const parsed = new URL(url);
+  parsed.searchParams.set("token", signedToken);
+  return parsed.toString();
+}
+
+export function resolvePlaybackUrls(params: {
+  uid: string;
+  playback?: StreamVideoResult["playback"];
+  thumbnail?: string;
+  signedToken?: string | null;
+}): StreamPlaybackUrls {
+  const hls = appendSignedToken(
+    toAbsoluteDeliveryUrl(params.playback?.hls ?? buildPublicPlaybackHlsUrl(params.uid)),
+    params.signedToken ?? null
+  );
+  const dash = appendSignedToken(
+    toAbsoluteDeliveryUrl(params.playback?.dash ?? buildPublicPlaybackDashUrl(params.uid)),
+    params.signedToken ?? null
+  );
+  const thumbnail = appendSignedToken(
+    toAbsoluteDeliveryUrl(params.thumbnail ?? buildPublicThumbnailUrl(params.uid)),
+    params.signedToken ?? null
+  );
+
+  return { hls, dash, thumbnail };
+}
+
+export async function getCloudflareVideoDelivery(uid: string) {
+  const [video, signedToken] = await Promise.all([getCloudflareVideo(uid), buildSignedPlaybackToken(uid)]);
+  return {
+    video,
+    signedToken,
+    playback: resolvePlaybackUrls({
+      uid,
+      playback: video.playback,
+      thumbnail: video.thumbnail,
+      signedToken
+    })
+  };
 }
 
 export async function buildSignedPlaybackToken(uid: string) {

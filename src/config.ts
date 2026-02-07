@@ -3,6 +3,16 @@ import { z } from "zod";
 
 dotenv.config();
 
+const deliveryBaseUrlSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return undefined;
+    return trimmed.includes("://") ? trimmed : `https://${trimmed}`;
+  },
+  z.string().url().default("https://videodelivery.net")
+);
+
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().default("0.0.0.0"),
@@ -11,7 +21,7 @@ const schema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   CLOUDFLARE_ACCOUNT_ID: z.string().min(1),
   CLOUDFLARE_STREAM_API_TOKEN: z.string().min(1),
-  CLOUDFLARE_STREAM_DELIVERY_BASE_URL: z.string().url().default("https://videodelivery.net"),
+  CLOUDFLARE_STREAM_DELIVERY_BASE_URL: deliveryBaseUrlSchema,
   CLOUDFLARE_STREAM_WEBHOOK_SECRET: z.string().optional(),
   CLOUDFLARE_STREAM_SIGNING_KEY_ID: z.string().optional(),
   CLOUDFLARE_STREAM_SIGNING_KEY_SECRET: z.string().optional(),

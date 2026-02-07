@@ -10,15 +10,17 @@ function toAuthor(profile) {
         interests: profile.interests ?? []
     };
 }
-function toBlocks(post) {
+function toBlocks(post, videoPlayback) {
     const blocks = [];
     if (post.media_type === "video") {
         blocks.push({
             id: `video-${post.id}`,
             type: "video",
-            url: post.media_url,
-            thumbnail_url: post.thumbnail_url ?? undefined,
-            caption: post.description
+            url: videoPlayback?.hls ?? post.media_url,
+            dash_url: videoPlayback?.dash,
+            thumbnail_url: videoPlayback?.thumbnail ?? post.thumbnail_url ?? undefined,
+            caption: post.description,
+            signed_token: videoPlayback?.signedToken ?? undefined
         });
     }
     else {
@@ -61,6 +63,24 @@ export function toApiPost(post, profile) {
         author: toAuthor(profile),
         title: post.title,
         blocks: toBlocks(post),
+        topics: [post.topic, ...(post.hashtags ?? [])],
+        created_at: post.created_at,
+        updated_at: post.updated_at,
+        stats: {
+            like_count: post.like_count,
+            bookmark_count: post.bookmark_count,
+            view_count: post.view_count,
+            comment_count: post.comment_count,
+            share_count: post.share_count
+        }
+    };
+}
+export function toApiPostWithVideoPlayback(post, profile, videoPlayback) {
+    return {
+        id: post.id,
+        author: toAuthor(profile),
+        title: post.title,
+        blocks: toBlocks(post, videoPlayback),
         topics: [post.topic, ...(post.hashtags ?? [])],
         created_at: post.created_at,
         updated_at: post.updated_at,

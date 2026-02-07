@@ -8,7 +8,7 @@ const streamWebhookSchema = z
   .object({
     uid: z.string().min(4).max(64),
     readyToStream: z.boolean().optional(),
-    duration: z.number().nonnegative().optional(),
+    duration: z.coerce.number().nonnegative().optional(),
     status: z
       .object({
         state: z.string().optional()

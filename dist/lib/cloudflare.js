@@ -9,7 +9,14 @@ async function cloudflareRequest(path, init) {
             ...(init?.headers ?? {})
         }
     });
-    const payload = (await response.json());
+    const rawPayload = await response.text();
+    let payload;
+    try {
+        payload = (rawPayload ? JSON.parse(rawPayload) : { success: response.ok, result: null });
+    }
+    catch {
+        throw new Error(`Unexpected Cloudflare API response (${response.status})`);
+    }
     if (!response.ok || !payload.success) {
         const errorText = payload.errors?.map((entry) => entry.message).join("; ") || "Cloudflare API error";
         throw new Error(errorText);
@@ -46,6 +53,41 @@ export function buildPublicPlaybackDashUrl(uid) {
 }
 export function buildPublicThumbnailUrl(uid) {
     return `${config.cloudflareDeliveryBaseUrl}/${uid}/thumbnails/thumbnail.jpg`;
+}
+function toAbsoluteDeliveryUrl(url) {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        return url;
+    }
+    if (url.startsWith("/")) {
+        return `${config.cloudflareDeliveryBaseUrl}${url}`;
+    }
+    return `${config.cloudflareDeliveryBaseUrl}/${url.replace(/^\/+/, "")}`;
+}
+function appendSignedToken(url, signedToken) {
+    if (!signedToken)
+        return url;
+    const parsed = new URL(url);
+    parsed.searchParams.set("token", signedToken);
+    return parsed.toString();
+}
+export function resolvePlaybackUrls(params) {
+    const hls = appendSignedToken(toAbsoluteDeliveryUrl(params.playback?.hls ?? buildPublicPlaybackHlsUrl(params.uid)), params.signedToken ?? null);
+    const dash = appendSignedToken(toAbsoluteDeliveryUrl(params.playback?.dash ?? buildPublicPlaybackDashUrl(params.uid)), params.signedToken ?? null);
+    const thumbnail = appendSignedToken(toAbsoluteDeliveryUrl(params.thumbnail ?? buildPublicThumbnailUrl(params.uid)), params.signedToken ?? null);
+    return { hls, dash, thumbnail };
+}
+export async function getCloudflareVideoDelivery(uid) {
+    const [video, signedToken] = await Promise.all([getCloudflareVideo(uid), buildSignedPlaybackToken(uid)]);
+    return {
+        video,
+        signedToken,
+        playback: resolvePlaybackUrls({
+            uid,
+            playback: video.playback,
+            thumbnail: video.thumbnail,
+            signedToken
+        })
+    };
 }
 export async function buildSignedPlaybackToken(uid) {
     if (!config.cloudflareSigningKeyId || !config.cloudflareSigningKeySecret) {

@@ -1,17 +1,13 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { requireAuth } from "../lib/auth.js";
 import {
-  buildPublicPlaybackDashUrl,
-  buildPublicPlaybackHlsUrl,
-  buildPublicThumbnailUrl,
-  buildSignedPlaybackToken,
   createDirectVideoUpload,
   deleteCloudflareVideo,
-  getCloudflareVideo
+  getCloudflareVideoDelivery
 } from "../lib/cloudflare.js";
 import { ensureProfile } from "../lib/profiles.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin, unwrapOptionalData } from "../lib/supabase.js";
 import { MAX_VIDEO_DURATION_SECONDS } from "../config.js";
 
 const directUploadSchema = z
@@ -21,8 +17,117 @@ const directUploadSchema = z
   })
   .strict();
 
+const uidParamSchema = z
+  .object({
+    uid: z.string().trim().min(4).max(64)
+  })
+  .strict();
+
+type VideoUploadRow = {
+  uid: string;
+  user_id: string;
+  status: string;
+  duration_seconds: number | null;
+  updated_at: string;
+};
+
+async function loadVideoUpload(uid: string) {
+  const result = await supabaseAdmin
+    .from("video_uploads")
+    .select("uid,user_id,status,duration_seconds,updated_at")
+    .eq("uid", uid)
+    .maybeSingle();
+
+  return unwrapOptionalData<VideoUploadRow>(
+    result as {
+      data: VideoUploadRow | null;
+      error: { code?: string; message: string } | null;
+    }
+  );
+}
+
+function verifyUploadOwnership(existingUpload: VideoUploadRow | null, requestUserId: string) {
+  if (!existingUpload) return false;
+  return existingUpload.user_id === requestUserId;
+}
+
+async function persistVideoUploadStatus(params: {
+  uid: string;
+  userId: string;
+  state: string;
+  durationSeconds: number | null;
+}) {
+  const upsertResult = await supabaseAdmin
+    .from("video_uploads")
+    .upsert({
+      uid: params.uid,
+      user_id: params.userId,
+      status: params.state,
+      duration_seconds: params.durationSeconds,
+      updated_at: new Date().toISOString()
+    });
+
+  if (upsertResult.error) {
+    throw new Error(upsertResult.error.message);
+  }
+}
+
 export async function registerMediaRoutes(fastify: FastifyInstance) {
   fastify.register(async (app) => {
+    const handleVideoRead = async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsedParams = uidParamSchema.safeParse(request.params);
+      if (!parsedParams.success) {
+        return reply.status(400).send({ error: parsedParams.error.flatten() });
+      }
+
+      const uid = parsedParams.data.uid;
+      const authUser = request.authUser;
+      if (!authUser) {
+        return reply.unauthorized("Missing authenticated user context");
+      }
+
+      const existingUpload = await loadVideoUpload(uid);
+      if (!existingUpload) {
+        return reply.notFound("Video upload not found");
+      }
+
+      if (!verifyUploadOwnership(existingUpload, authUser.id)) {
+        return reply.forbidden("Video upload does not belong to current user");
+      }
+
+      const { video, signedToken, playback } = await getCloudflareVideoDelivery(uid);
+      const durationSeconds = Math.round(video.duration ?? 0);
+
+      if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+        // Hard backstop: remove assets over policy length.
+        await deleteCloudflareVideo(uid);
+        return reply.unprocessableEntity("Video exceeds 3-minute limit");
+      }
+
+      const state = video.status?.state ?? (video.readyToStream ? "ready" : "processing");
+      await persistVideoUploadStatus({
+        uid,
+        userId: authUser.id,
+        state,
+        durationSeconds: durationSeconds > 0 ? durationSeconds : null
+      });
+
+      return {
+        uid,
+        readyToStream: Boolean(video.readyToStream),
+        durationSeconds: durationSeconds > 0 ? durationSeconds : null,
+        state,
+        errorReasonCode: video.status?.errorReasonCode ?? null,
+        errorReasonText: video.status?.errorReasonText ?? null,
+        playback: {
+          hls: playback.hls,
+          dash: playback.dash,
+          thumbnail: playback.thumbnail,
+          signedToken
+        }
+      };
+    };
+
     app.post("/video/direct-upload", { preHandler: requireAuth }, async (request, reply) => {
       const parsed = directUploadSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
@@ -36,13 +141,16 @@ export async function registerMediaRoutes(fastify: FastifyInstance) {
         mimeType: parsed.data.mimeType
       });
 
-      await supabaseAdmin
+      const upsertResult = await supabaseAdmin
         .from("video_uploads")
         .upsert({
           uid: upload.uid,
           user_id: profile.id,
           status: "pending"
         });
+      if (upsertResult.error) {
+        throw new Error(upsertResult.error.message);
+      }
 
       return {
         uid: upload.uid,
@@ -51,45 +159,7 @@ export async function registerMediaRoutes(fastify: FastifyInstance) {
       };
     });
 
-    app.get("/video/:uid/status", { preHandler: requireAuth }, async (request, reply) => {
-      const uid = (request.params as { uid: string }).uid;
-      const authUser = request.authUser;
-      if (!authUser) {
-        return reply.unauthorized("Missing authenticated user context");
-      }
-      const video = await getCloudflareVideo(uid);
-      const durationSeconds = Math.round(video.duration ?? 0);
-
-      if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
-        // Hard backstop: remove assets over policy length.
-        await deleteCloudflareVideo(uid);
-        return reply.unprocessableEntity("Video exceeds 3-minute limit");
-      }
-
-      const signedToken = await buildSignedPlaybackToken(uid);
-
-      await supabaseAdmin
-        .from("video_uploads")
-        .upsert({
-          uid,
-          user_id: authUser.id,
-          status: video.status?.state ?? (video.readyToStream ? "ready" : "processing"),
-          duration_seconds: durationSeconds > 0 ? durationSeconds : null,
-          updated_at: new Date().toISOString()
-        });
-
-      return {
-        uid,
-        readyToStream: Boolean(video.readyToStream),
-        durationSeconds: durationSeconds > 0 ? durationSeconds : null,
-        state: video.status?.state ?? null,
-        playback: {
-          hls: buildPublicPlaybackHlsUrl(uid),
-          dash: buildPublicPlaybackDashUrl(uid),
-          thumbnail: buildPublicThumbnailUrl(uid),
-          signedToken
-        }
-      };
-    });
+    app.get("/video/:uid", { preHandler: requireAuth }, handleVideoRead);
+    app.get("/video/:uid/status", { preHandler: requireAuth }, handleVideoRead);
   }, { prefix: "/v1/media" });
 }

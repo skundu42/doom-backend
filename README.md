@@ -13,7 +13,7 @@ Fastify backend for Doomscroll with:
 ## 2. Setup
 1. Copy env:
    - `cp .env.example .env`
-2. Fill env values in `backend/.env`:
+2. Fill env values in `.env`:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `CLOUDFLARE_ACCOUNT_ID`
@@ -52,6 +52,7 @@ Base prefix: `/v1`
 
 ### Media
 - `POST /v1/media/video/direct-upload`
+- `GET /v1/media/video/:uid`
 - `GET /v1/media/video/:uid/status`
 
 ### Devices (push token registration)
@@ -70,9 +71,11 @@ The backend validates tokens with Supabase Admin API (`auth.getUser`).
 1. Client calls `POST /v1/media/video/direct-upload` with optional filename/mime.
 2. Backend returns `{ uid, uploadUrl, maxDurationSeconds: 180 }`.
 3. Client uploads raw video bytes directly to `uploadUrl` (no backend proxy).
-4. Client polls `GET /v1/media/video/:uid/status` until `readyToStream=true`.
+4. Client polls `GET /v1/media/video/:uid` (or `.../status`) until `readyToStream=true`.
+   - Response includes `playback.hls`, `playback.dash`, `playback.thumbnail`.
+   - If Stream signing keys are configured, response also includes `playback.signedToken`.
 5. Client creates post with `media.type="video"` and `cloudflareUid`.
-6. Backend validates duration again and rejects anything over 180s.
+6. Backend enforces video ownership, ready-to-stream state, and duration <= 180s.
 
 ## 6. Post Create Payload
 Image post:
